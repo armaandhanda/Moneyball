@@ -1,0 +1,573 @@
+---
+title: "Predictive Analytics"
+subtitle: "Application: Moneyball"
+author: "Armaan Dhanda"
+date: "November 13, 2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# 1. Overview
+
+The bestselling book "Moneyball" by Michael Lewis and subsequent film details the Oakland Athletics' evolution into a data-driven baseball team under general manager, Billy Beane. This lab provides some illustrative analysis to examine how individual baseball player statistics predict overall performance. We will explore linear regression, out-of-sample performance using training and testing datasets, cross-validation, decision trees, and random forests.
+
+# 2. Data Collection
+
+The BASEBALL.csv file contains data on professional baseball players with multiple years of data per player, from 1998 to 2013, for a total of 1,878 observations. There are 274 variables comprising many individual baseball statistics, with descriptions available in the file DATA_DICTIONARY. Here, we will focus on the following variables:
+
+* **Player:** Baseball player's name
+* **Year:** MLB season
+* **Team:** MLB team
+* **Salary:** Player salary
+* **Pos:** Categorical variable for player position on field
+* **Age:** Player age
+* **G:** Games played
+* **AB:** At bats
+* **R:** Runs scored
+* **H:** Hits
+* **X2B:** Doubles
+* **X3B:** Triples
+* **HR:** Home runs
+* **RBI:** Runs batted in
+* **SB:** Stolen bases
+* **CS:** Times caught stealing
+* **BB:** Bases on balls (walks)
+* **SO:** Strikeouts
+* **BA:** Bating average
+* **OBP:** On-base percentage
+* **WAR:** Wins above replacement level
+
+
+Let's first load some useful libraries. Be sure to install the packages first (one time only).
+```{r message = FALSE}
+
+
+# Load libraries
+library(tidyverse)
+library(gt)
+library(scales)
+library(plotly)
+library(corrplot)
+library(jtools)
+library(caTools)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(xgboost)
+
+```
+
+Set working directory and import data. We will focus our analysis on only the selected set of variables.
+```{r}
+setwd("/Users/vishwasdhanda/Desktop/sports/Lab2_Baseball")
+BASEBALL = read.csv("BASEBALL.csv")
+
+DATA = BASEBALL %>%
+  select(c(Player, Team, Year, Salary, Pos, Age, G, AB, R, H, X2B, X3B, HR, RBI, SB, CS, BB, SO, BA, OBP, WAR)) 
+
+DATA$Year = as.factor(DATA$Year)
+```
+
+
+# 3. Data Exploration
+
+**QUESTION 1:** Create a histogram of the variable Salary to see how it is distributed. Use facet_wrap to make a separate histogram for each player position.
+```{r}
+ggplot(data = DATA, aes(x = Salary/1000000)) + facet_wrap(~Pos, ncol = 3) +
+  geom_histogram(binwidth = 1, fill="darkgreen", color="white") +
+  scale_x_continuous("Player Salary", labels = dollar_format(suffix = "M")) 
+```
+
+**QUESTION 2:** Which 2 player positions have the highest average player salary per season? HINT: Use %>% to calculate the mean salary by position.
+```{r}
+library(dplyr)
+library(gt)
+
+# Calculate mean salary by position
+POSITION = DATA %>%
+  group_by(Pos) %>%  # Group by player position
+  summarize(MeanSalary = mean(Salary, na.rm = TRUE)) %>%  # Calculate mean salary
+  arrange(desc(MeanSalary))  # Sort by descending mean salary
+
+# Display the result in a formatted table
+gt(POSITION) %>%
+  tab_header(
+    title = "Average Player Salary by Position",
+    subtitle = "Sorted by Highest Average Salary"
+  )
+
+```
+
+**ANSWER:** 
+
+Next, we will create an interactive plot using the plotly package to visualize a player's salary versus hits, highlighting the player names in the scatterplot.
+```{r}
+# Create a ggplot scatter plot
+scatter_plot = ggplot(data = DATA, aes(x = H, y = Salary, fill = Pos)) +
+  geom_point(aes(label = Player), pch = 20) +
+  scale_x_continuous("Hits") +
+  scale_y_continuous("Player Salary", labels = dollar_format()) 
+
+# Convert the ggplot to an interactive plot using ggplotly
+interactive_plot = ggplotly(scatter_plot)
+
+# Display the interactive plot
+interactive_plot
+```
+
+**QUESTION 3:** Which player (with hits > 0) has the highest salary per hit? Which team did he play for? What was his salary and number of hits? HINT: Use %>% along with filter, mutate, and arrange.
+```{r}
+HITS = DATA %>%
+  filter(H > 0) %>%  
+  mutate(SalaryPerHit = Salary / H) %>%  
+  arrange(desc(SalaryPerHit))  
+
+# Print the details of the player with the highest SalaryPerHit
+print(HITS$Player[1])  
+print(HITS$Team[1])    
+print(HITS$Salary[1]) 
+print(HITS$H[1])       
+
+```
+**ANSWER:** 
+"Eric Chavez"
+"OAK"
+salary 11500000
+hits 3
+
+# 4. Linear Regression
+
+The outcome Wins Above Replacement (WAR) is an advanced baseball statistic that attempts to measure the total value provided by a player. Using a comparison in relative wins over the course of a season, we can see how valuable a player is as compared to a "replacement" player, essentially a player readily available to any team for the league minimum salary. If a player has 6 WAR, they added 6 "wins" to their team and were 6 "wins" better than a replacement-level player. Source: https://www.samford.edu/sports-analytics/fans/2023/Sabermetrics-101-Understanding-the-Calculation-of-WAR
+
+Let's first create a correlation matrix of the numeric variables.
+```{r}
+C = cor(DATA[c("Age", "G", "AB", "R", "H", "X2B", "X3B", "HR", "RBI", "SB", "CS", "BB", "SO", "BA", "OBP", "WAR")])
+corrplot(C, method = "number", type = "lower", number.cex = 0.6)
+```
+
+**QUESTION 4:** Which 2 variables are most highly correlated (positively or negatively)? Why is this the case? Exclude variables correlated with themselves (the diagonal).
+
+**ANSWER:** 
+Hits (H) and At Bats (AB): 0.98
+More at-bats give players more opportunities to achieve hits.
+
+Runs (R) and At Bats (AB): 0.93
+Players with more at-bats tend to score more runs.
+
+Runs (R) and Hits (H): 0.94
+Scoring runs is highly associated with a player's ability to get on base via hits.
+
+Doubles (X2B) and Hits (H): 0.90
+A higher number of hits increases the likelihood of hitting doubles.
+
+Runs Batted In (RBI) and Hits (H): 0.89
+More hits often lead to more opportunities to drive in runs (RBI).
+
+Doubles (X2B) and At Bats (AB): 0.81
+Players with more at-bats also have more chances to hit doubles.
+
+Runs Batted In (RBI) and At Bats (AB): 0.85
+Players with more at-bats have greater opportunities to drive in runs (RBI).
+
+Runs (R) and Games Played (G): 0.85
+Players who play more games tend to score more runs.
+
+
+**QUESTION 5:** Run a simple linear regression with Wins Above Replacement (WAR) as the dependent variable and On-Base Percentage (OBP) as the independent variable. What is R2? How does this relate to the correlation between WAR and OBP?
+```{r}
+Regression1 = lm(WAR ~ OBP, data = DATA)
+summ(Regression1, digits = 3)
+```
+**ANSWER:** 
+The regression analysis shows that On-Base Percentage (OBP) explains 31.5% of the variance in Wins Above Replacement (WAR) (R2)
+ =0.315), with a positive correlation of approximately 0.561. This indicates a moderate linear relationship, and OBP is a statistically significant predictor of WAR.
+
+**QUESTION 6:** Run a multiple regression of WAR on all the variables from the correlation matrix, plus Position and Year dummy variables.
+```{r}
+DATA$Pos <- as.factor(DATA$Pos)
+DATA$Year <- as.factor(DATA$Year)
+Regression2 <- lm(WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year, data = DATA)
+
+summary(Regression2)  # Base R summary
+summ(Regression2, digits = 3)  # Cleaned-up summary using broom
+```
+
+
+# 5. Training and Testing Datasets
+
+Using the same regression formulation as in Question 6, train a new model using 80/20 split for training and testing data. Then test the model and calculate out-of-sample performance using 3 metrics: root mean squared error (RMSE), coefficient of determination (R2), and mean absolute error (MAE).
+```{r}
+set.seed(99)
+
+split = sample.split(DATA$WAR, SplitRatio = 0.80)
+
+TRAIN = subset(DATA, split == TRUE)
+TEST = subset(DATA, split == FALSE)
+
+Model = lm(WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year, data = TRAIN)
+
+summary(Model)
+summ(Model, digits = 3)
+```
+
+```{r}
+TEST$Prediction = predict(Model, TEST)
+
+PerfLR = data.frame(Type = "Linear Regression",
+                     RMSE = RMSE(TEST$Prediction, TEST$WAR),
+                     R2 = R2(TEST$Prediction, TEST$WAR),
+			               MAE = MAE(TEST$Prediction, TEST$WAR))
+gt(PerfLR)
+```
+
+**QUESTION 7:** How many observations are in the training and testing datasets? What is the in-sample and out-of-sample R2?
+
+**ANSWER:** 
+training= 1507
+testing = 1878 - 1507 = 371
+The model generalizes well, as the drop in R2  from in-sample (0.793) to out-of-sample (0.747641) is relatively small.
+
+
+
+# 6. Cross Validation
+
+Run a 5-fold cross validation on the full dataset using the same regression formulation.
+```{r}
+train_control = trainControl(method = "cv", number = 5)
+
+ModelCV = train(
+  WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year,
+  data = DATA,
+  method = "lm",                  # Linear regression
+  trControl = train_control       # Cross-validation settings
+)
+
+DATA$PredictionCV = predict(ModelCV, newdata = DATA)
+
+PerfCV = data.frame(Type = "Linear Regression 5-fold CV",
+                       RMSE = RMSE(DATA$PredictionCV, DATA$WAR),
+                       R2 = R2(DATA$PredictionCV, DATA$WAR),
+			                 MAE = MAE(DATA$PredictionCV, DATA$WAR))
+gt(PerfCV)
+
+
+
+```
+
+**QUESTION 8:** How does this model performance compare to the single training/testing approach?
+
+**ANSWER:** 
+1 Root Mean Squared Error (RMSE):
+
+5-fold CV RMSE (0.8921) is slightly lower than the single train-test split RMSE (0.9141).
+This indicates the cross-validation model performs slightly better at reducing large prediction errors.
+
+2 Coefficient of Determination (R2):
+
+5-fold CV R2 (0.7855) is higher than the single train-test R2 (0.7476).This means the cross-validation model explains a higher proportion of the variability in WAR.
+
+3 Mean Absolute Error (MAE):
+
+5-fold CV MAE (0.6704) is lower than the single train-test MAE (0.6902).
+The cross-validation model achieves more accurate predictions on average.
+
+
+**QUESTION 9:** Create a scatterplot of predicted WAR (with CV) versus actual WAR.
+```{r}
+ggplot(data = DATA, aes(x = WAR, y = PredictionCV)) +
+  geom_point(alpha = 0.25, color = "blue") +
+  geom_abline(a = 0, b = 1, color = "darkred") +
+  scale_x_continuous("Actual Wins Above Replacement (WAR)", limits = c(0,8)) +
+  scale_y_continuous("Predicted Wins Above Replacement (WAR)", limits = c(0,8))
+```
+
+
+# 7. Decision Tree
+
+Create a decision tree (on the training dataset) to predict WAR using the same set of features as in the regression. Start by setting a maxdepth of 2 levels. In the bottom nodes, the top number refers to the predicted WAR, and the bottom number is the percent of players who fall into each bucket.
+```{r}
+SimpleTree = rpart(
+  WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year,
+  data = TRAIN,
+  method = "anova",  # For regression trees
+  control = rpart.control(maxdepth = 2)  # Limit the depth of the tree to 2 levels
+)
+rpart.plot(SimpleTree, type = 5, clip.left.labs=FALSE, clip.right.labs=FALSE, box.palette = "RdYlGn")
+```
+
+**QUESTION 10:** Using the simple tree, what is the predicted WAR for a player with 75 runs and on-base percentage of 0.25?
+
+**ANSWER:** 
+2.6
+
+**QUESTION 11:** Construct a more complex tree with no limit on the depth. What are your observations?
+```{r}
+ComplexTree= rpart(
+  WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year,
+  data = TRAIN,
+  method = "anova",  # For regression trees
+)
+  
+rpart.plot(ComplexTree, type = 5, clip.left.labs=FALSE, clip.right.labs=FALSE, box.palette = "RdYlGn")
+```
+
+**ANSWER:** 
+Splitting Variables:
+The tree uses a wider range of variables like BA (Batting Average), H (Hits), and others, indicating finer splits and more detailed relationships.
+Predicted Values:
+Terminal nodes represent more specific subgroups, with predictions based on a narrower subset of players.
+Bucket Percentages:
+The percentages are smaller in each terminal node due to the detailed splits.
+Observation:
+The tree captures more nuances and interactions between variables, but at the cost of interpretability and potential overfitting.
+
+
+Calculate out-of-sample performance of the complex tree using RMSE, R2, and MAE.
+```{r}
+TEST$PredictionTree = predict(ComplexTree, TEST)
+
+PerfTree = data.frame(Type = "Decision Tree",
+                         RMSE = RMSE(TEST$PredictionTree, TEST$WAR),
+                         R2 = R2(TEST$PredictionTree, TEST$WAR),
+			                   MAE = MAE(TEST$PredictionTree, TEST$WAR))
+gt(PerfTree)
+```
+
+**QUESTION 12:** How does this model performance compare to 5-fold CV?
+
+**ANSWER:** 
+Model	                        RMSE	    R2        MAE
+Complex Decision Tree	        1.134131	0.6050011	0.8596361
+Linear Regression (5-Fold CV)	0.8921139	0.7855299	0.670356
+
+-Root Mean Squared Error (RMSE):
+
+5-Fold CV Linear Regression (RMSE = 0.8921139) outperforms the complex decision tree (RMSE = 1.134131).
+A lower RMSE for the linear regression model indicates that it has smaller large-scale errors compared to the decision tree.
+
+-Coefficient of Determination (R2):
+
+5-Fold CV Linear Regression (R2=0.7855)explains significantly more variance in WAR compared to the complex decision tree (R2=0.6050).
+This shows that the linear regression model captures more of the relationships between features and WAR.
+
+-Mean Absolute Error (MAE):
+
+5-Fold CV Linear Regression (MAE = 0.6703567) has a lower average prediction error than the complex decision tree (MAE = 0.8596361).
+This indicates that linear regression predictions are closer to actual WAR values on average.
+
+
+# 8. Random Forest 
+
+Create a random forest (on the training dataset) using the same set of features. Calculate the model's performance.
+```{r}
+set.seed(99)
+
+ModelRF = randomForest(
+  WAR ~ Age + G + AB + R + H + X2B + X3B + HR + RBI + SB + CS + BB + SO + BA + OBP + Pos + Year,
+  data = TRAIN,
+  ntree = 1000,         # Number of trees
+  mtry = 10,            # Number of variables randomly sampled as candidates at each split
+  importance = TRUE     # Calculate variable importance
+)
+
+plot(ModelRF)
+```
+
+```{r}
+TEST$PredictionRF = predict(ModelRF, TEST)
+
+PerfRF = data.frame(Type = "Random Forest",
+                     RMSE = RMSE(TEST$Prediction, TEST$WAR),
+                     R2 = R2(TEST$Prediction, TEST$WAR),
+			               MAE = MAE(TEST$Prediction, TEST$WAR))
+
+gt(PerfRF)
+```
+
+Create a variance importance plot.
+```{r}
+varImpPlot(ModelRF, type=1)
+```
+
+**QUESTION 13:** How is variable importance measured here? Which 3 variables are most important at predicting WAR? How significant are these variables in the linear regression in Question 6? 
+
+**ANSWER:** 
+
+Top 3 Most Important Variables for Predicting WAR
+1 On-Base Percentage (OBP)
+2 Runs Scored (R)
+3 Batting Average (BA)
+
+Significance of These Variables in the Linear Regression Model (Question 6):
+From the regression model:
+
+On-Base Percentage (OBP):
+
+Coefficient: 4.197, 
+p-value = 0.003.
+Statistically significant and positively related to WAR, aligning with its importance in the Random Forest.
+
+Runs Scored (R):
+
+Coefficient: 0.016, 
+p-value = <0.001.
+Highly significant, with a positive association with WAR.
+Batting Average (BA):
+
+Coefficient: -5.069, 
+p-value = 0.015.
+Significant but negatively associated with WAR. This result may reflect multicollinearity with OBP or other variables, as BA and OBP are often highly correlated.
+
+
+# 9. Advanced Models
+
+**QUESTION 14:** Run 1 other predictive model (XGBoost or neural network) using the same set of features. Calculate the model's out-of-sample performance. Repeat this after tuning the parameters. What is the highest R2 you achieve?
+```{r}
+# Load required libraries
+library(xgboost)
+library(caret)
+library(dplyr)
+
+# Extract features and target
+train_features <- TRAIN %>%
+  select(-Player, -Team, -Salary, -WAR)  # Exclude non-predictive columns
+train_target <- TRAIN$WAR  # Target variable
+
+test_features <- TEST %>%
+  select(-Player, -Team, -Salary, -WAR)  # Exclude non-predictive columns
+test_target <- TEST$WAR  # Target variable
+
+# Convert categorical variables into one-hot encoding
+encoder <- dummyVars("~ .", data = train_features)
+train_features_encoded <- predict(encoder, newdata = train_features)
+test_features_encoded <- predict(encoder, newdata = test_features)
+
+# Ensure consistent feature columns in training and test datasets
+test_features_encoded <- test_features_encoded[, colnames(train_features_encoded)]
+# Convert data to matrix
+X_train_matrix <- as.matrix(train_features_encoded)
+X_test_matrix <- as.matrix(test_features_encoded)
+
+y_train <- as.numeric(train_target)
+y_test <- as.numeric(test_target)
+# Train XGBoost model
+set.seed(99)
+xgb_baseline <- xgboost(
+  data = X_train_matrix,
+  label = y_train,
+  nrounds = 100,  # Number of boosting rounds
+  objective = "reg:squarederror",  # Regression task
+  verbose = 0    # Suppress output
+)
+# Predict on the test set
+y_pred_baseline <- predict(xgb_baseline, X_test_matrix)
+
+# Calculate performance metrics
+library(Metrics)
+
+PerfXGB <- data.frame(
+  Type = "XGBoost (Baseline)",
+  RMSE = rmse(y_test, y_pred_baseline),
+  R2 = R2(y_pred_baseline, y_test),
+  MAE = mae(y_test, y_pred_baseline)
+)
+print(PerfXGB)
+
+
+```
+```{r}
+# Set up parameter grid for tuning
+xgb_grid <- expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 5, 7),
+  eta = c(0.01, 0.1, 0.3),
+  gamma = c(0, 1, 5),
+  colsample_bytree = c(0.6, 0.8, 1),
+  min_child_weight = c(1, 5, 10),
+  subsample = c(0.6, 0.8, 1)
+)
+
+# Train control for cross-validation
+train_control <- trainControl(
+  method = "cv",
+  number = 5,  # 5-fold cross-validation
+  verboseIter = TRUE
+)
+
+# Train the tuned model
+set.seed(99)
+xgb_tuned <- train(
+  x = X_train_matrix,
+  y = y_train,
+  method = "xgbTree",
+  tuneGrid = xgb_grid,
+  trControl = train_control,
+  metric = "RMSE"
+)
+
+# Predict using the tuned model
+y_pred_tuned <- predict(xgb_tuned, X_test_matrix)
+
+# Calculate performance metrics
+PerfXGBTuned <- data.frame(
+  Type = "XGBoost (Tuned)",
+  RMSE = rmse(y_test, y_pred_tuned),
+  R2 = R2(y_pred_tuned, y_test),
+  MAE = mae(y_test, y_pred_tuned)
+)
+print(PerfXGBTuned)
+
+```
+Combine all the performance metrics into a single table.
+```{r}
+
+PERFORMANCE = rbind(PerfLR, PerfCV, PerfTree, PerfRF, PerfXGB, PerfXGBTuned)
+gt(PERFORMANCE)
+
+
+```
+
+**QUESTION 15:** Suppose you are a manager of a Major League Baseball team. How might one of these predictive models be used to evaluate free agents to potentially sign? Which model would you recommend using?
+
+**ANSWER:** 
+
+
+Performance Prediction: Models predict the Wins Above Replacement (WAR) of a player, a key metric for estimating their overall impact on team success.
+
+Cost-Efficiency Analysis: By comparing predicted WAR with a player's salary, teams can assess whether a player offers good value for their cost.
+
+Comparing Candidates: These models enable the team to compare multiple players objectively, factoring in their statistics, age, and position to identify the best fit for the team.
+
+Risk Mitigation: By using predictions based on historical data, teams can minimize the risks of overpaying for underperforming players.
+
+Position-Specific Analysis: Models include positional data to tailor predictions, ensuring evaluations are relevant to the player's role on the team.
+
+Which Model Would You Recommend Using?
+Based on the performance metrics:
+
+Linear Regression with Cross-Validation has the lowest RMSE (0.892) and highest R² (0.7855), making it the most accurate model overall.
+
+XGBoost (Tuned) offers competitive performance (RMSE: 0.906, R²: 0.7478) and handles complex relationships better than Linear Regression. However, its slightly higher RMSE and MAE make it less favorable for prediction accuracy.
+
+Random Forest and Baseline XGBoost perform worse than Linear Regression and XGBoost (Tuned).
+
+Decision Tree has the highest RMSE (1.334) and lowest R² (0.4626), making it the least accurate model.
+
+Final Recommendation
+Data Limitations:
+
+With the current dataset, Linear Regression performs well because it is less prone to overfitting and aligns with the limited data size.
+As the dataset grows or becomes more detailed, XGBoost's ability to capture complex patterns may outperform Linear Regression.
+
+Ensemble Approach:
+
+Combining predictions from both Linear Regression and XGBoost (Tuned) in an ensemble model could provide a balanced approach. This would leverage the strengths of both simplicity and accuracy from Linear Regression and the nuanced, non-linear modeling capability of XGBoost.
+
+Scalability:
+
+For quick and interpretable predictions, Linear Regression is ideal.
+For long-term scalability with larger datasets or real-time predictions, transitioning to XGBoost or an ensemble approach would be beneficial.
